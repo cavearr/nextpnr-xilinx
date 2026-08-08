@@ -511,11 +511,55 @@ void XC7Packer::pack_carries_atomic()
                         }
                         sum_ff = u.cell;
                     }
+                    // Control-set guard: all 8 FFs of an xc7 slice share
+                    // CLK/CE/SR, and the validity check rejects the whole
+                    // slice on a mismatch -- a chain whose adopted sum-FFs
+                    // mix control sets has NO legal position at all and dies
+                    // with "Unable to find legal placement for cell
+                    // ...carry4" (budget exhausted; litex qmtech-a100).
+                    // Adopt only when compatible with the FFs already
+                    // anchored on this row; a skipped FF stays with the
+                    // generic packer.
+                    auto ff_ctrlsig = [&](CellInfo *ff) {
+                        auto net_of = [&](const char *p) {
+                            NetInfo *n = get_net_or_empty(ff, ctx->id(p));
+                            return n ? n->name.str(ctx) : std::string("-");
+                        };
+                        std::string sig = ff->type.str(ctx);
+                        sig += "|" + net_of("C") + "|" + net_of("CE");
+                        sig += "|" + net_of("R") + net_of("S") + net_of("CLR") + net_of("PRE");
+                        for (const char *p :
+                             {"IS_C_INVERTED", "IS_R_INVERTED", "IS_S_INVERTED",
+                              "IS_CLR_INVERTED", "IS_PRE_INVERTED"}) {
+                            auto it = ff->params.find(ctx->id(p));
+                            if (it != ff->params.end())
+                                sig += "|" + it->second.to_string();
+                            else
+                                sig += "|.";
+                        }
+                        return sig;
+                    };
+                    bool ctrl_ok = true;
+                    if (sum_ff != nullptr) {
+                        std::string sig = ff_ctrlsig(sum_ff);
+                        for (auto child : anchor->constr_children) {
+                            if (child == sum_ff || child->constr_y != anchor_y)
+                                continue;
+                            if (!child->constr_abs_z || (child->constr_z & 0xF) != BEL_FF)
+                                continue;
+                            if (!ff_types.count(child->type))
+                                continue;
+                            if (ff_ctrlsig(child) != sig) {
+                                ctrl_ok = false;
+                                break;
+                            }
+                        }
+                    }
                     // Only adopt a plain, un-pinned, un-constrained FF whose D
                     // is THIS O[z] (single FF sink).  Leave anything exotic
                     // (multiple FF sinks, pinned, already clustered) to the
                     // generic packer.
-                    if (sum_ff != nullptr && !ambiguous &&
+                    if (sum_ff != nullptr && !ambiguous && ctrl_ok &&
                         !sum_ff->attrs.count(ctx->id("BEL")) &&
                         sum_ff->constr_parent == nullptr &&
                         sum_ff->constr_children.empty()) {
