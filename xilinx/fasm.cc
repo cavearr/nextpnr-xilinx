@@ -756,7 +756,19 @@ struct FasmBackend
                 // (PCS/PMA gmii_rst_sync, GT TX startup) at configuration.
                 int def_init = (type == "FDSE" || type == "FDSE_1" ||
                                 type == "FDPE" || type == "FDPE_1") ? 1 : 0;
-                zinit = (int_or_default(ff->params, ctx->id("INIT"), def_init) != 1);
+                // int_or_default only falls back to def_init when INIT is
+                // absent -- but a yosys/async2sync-built netlist (as
+                // opposed to a Vivado-authored one) commonly leaves INIT
+                // *present* with an undefined ('x') value instead of
+                // omitting it, which int_or_default resolves to 0 via
+                // Property::update_intval() (an 'x' bit contributes 0),
+                // silently reproducing the exact bug this comment already
+                // fixed for the absent-parameter case. Treat a present-but-
+                // undefined INIT the same as an absent one.
+                auto init_it = ff->params.find(ctx->id("INIT"));
+                bool init_defined = (init_it != ff->params.end()) && init_it->second.is_fully_def();
+                int init_val = init_defined ? int_or_default(ff->params, ctx->id("INIT"), def_init) : def_init;
+                zinit = (init_val != 1);
                 if (type == "FDRE") {
                     zrst = true;
                     SET_CHECK(negedge_ff, false);
