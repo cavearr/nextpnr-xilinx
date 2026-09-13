@@ -674,6 +674,33 @@ struct ArchArgs
     std::string chipdb;
 };
 
+// Single source of truth for the CLK_HROW BUFHCE pass-through pip's wire
+// naming, shared by Arch::routeBufhcePassthroughCE() (arch.cc, which needs to
+// recognise the pip on a real placed/routed net) and FasmBackend's pp_config
+// table registration (fasm.cc, which needs to build the same wire names to
+// register the feature strings) -- so the two cannot independently drift.
+inline void bufhcePassthroughWireNames(const std::string &hck, std::string &dst_wire, std::string &src_wire)
+{
+    dst_wire = "CLK_HROW_CK_HCLK_OUT_" + hck;
+    src_wire = "CLK_HROW_CK_MUX_OUT_" + hck;
+}
+
+inline bool matchBufhcePassthroughPip(const std::string &dst_wire, const std::string &src_wire, std::string &hck)
+{
+    static const std::string dst_pfx = "CLK_HROW_CK_HCLK_OUT_";
+    static const std::string src_pfx = "CLK_HROW_CK_MUX_OUT_";
+    bool dst_matches = (dst_wire.compare(0, dst_pfx.size(), dst_pfx) == 0);
+    bool src_matches = (src_wire.compare(0, src_pfx.size(), src_pfx) == 0);
+    if (!dst_matches || !src_matches)
+        return false;
+    std::string dst_hck = dst_wire.substr(dst_pfx.size());
+    std::string src_hck = src_wire.substr(src_pfx.size());
+    if (dst_hck != src_hck)
+        return false;
+    hck = dst_hck;
+    return true;
+}
+
 struct Arch : BaseCtx
 {
     boost::iostreams::mapped_file_source blob_file;
@@ -1678,6 +1705,8 @@ struct Arch : BaseCtx
     int insertConstDrivers(const std::vector<ConstHoldout> &holdouts, std::vector<ConstHoldout> &unplaced);
     void ripupConstNets();
     void routeClock();
+    void routeBufhcePassthroughCE();
+    bool bridgeConstToWire(NetInfo *net, int pseudo_intent, WireId sink, int iter_max, int *iters_out = nullptr);
     void applyFixedRoutes(const std::string &filename);
     void writeFixedRoutes(const std::string &filename) const;
     bool gtClockTemplateRoute(NetInfo *clk_net, PortRef &usr);

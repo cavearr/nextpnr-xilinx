@@ -303,11 +303,26 @@ struct FasmBackend
                     std::string ii = std::to_string(i);
                     std::string hck = s2 + ii;
                     std::string buf = std::string((s2 == "R") ? "X1Y" : "X0Y") + ii;
+                    std::string dst_wire, src_wire;
+                    bufhcePassthroughWireNames(hck, dst_wire, src_wire);
                     pp_config[{ ctx->id("CLK_HROW_" + s1 + "_R"),
-                                ctx->id("CLK_HROW_CK_HCLK_OUT_" + hck), ctx->id("CLK_HROW_CK_MUX_OUT_" + hck) }] = {
+                                ctx->id(dst_wire), ctx->id(src_wire) }] = {
                                     "BUFHCE.BUFHCE_" + buf + ".IN_USE",
-                                    "BUFHCE.BUFHCE_" + buf + ".ZINV_CE"
-                                };
+                                    // ZINV_CE IS set here (uninverted CE): Arch::routeBufhcePassthroughCE()
+                                    // ties this BUFHCE's CE to VCC, explicitly binding the same real,
+                                    // bitless net path the device's own default (INT tile IMUX inputs
+                                    // default to VCC_WIRE) already implied -- matching Vivado's own
+                                    // reference for this resource (IN_USE + ZINV_CE set, CE=1 uninverted,
+                                    // zero interconnect bits spent) bit for bit (nextpnr-xilinx#177, #187).
+                                    "BUFHCE.BUFHCE_" + buf + ".ZINV_CE",
+                                    // CE_TYPE.ASYNC and INIT_OUT deliberately NOT set here: a hardware
+                                    // A/B campaign against five real Vivado golden references for this
+                                    // exact pass-through resource (MMCM->BUFG/BUFH/BUFHCE, nextpnr-xilinx
+                                    // #177) found Vivado never sets either bit -- not even when the source
+                                    // netlist explicitly carries CE_TYPE("SYNC")/INIT_OUT(0) params -- so
+                                    // emitting them here doesn't match Vivado's actual behavior for a
+                                    // route-thru pass-through.
+                                    };
                 }
             }
 
