@@ -485,9 +485,10 @@ void XilinxPacker::pack_dram()
             CellInfo *base = nullptr;
             for (CellInfo *ci : group.second) {
                 NPNR_ASSERT(ci->type == ctx->id("RAM64X1S")); // FIXME
-                if (z < 0) {
-                    // Site full: the next cell starts a fresh one, which the
-                    // placer places anywhere (as the RAM64X1D path does).
+                // A full site means the next cell starts a fresh one, which the
+                // placer places anywhere (as the RAM64X1D path does).
+                const bool site_is_full = (z < 0);
+                if (site_is_full) {
                     z = height - 1;
                     base = nullptr;
                 }
@@ -496,7 +497,8 @@ void XilinxPacker::pack_dram()
                 disconnect_port(ctx, ci, ctx->id("O"));
                 CellInfo *spr = create_dram_lut(ci->name.str(ctx) + "/SP", base, cs, cs.wa,
                                                 get_net_or_empty(ci, ctx->id("D")), o, z);
-                if (base == nullptr)
+                const bool is_first_cell_in_site = (base == nullptr);
+                if (is_first_cell_in_site)
                     base = spr;
                 spr->params[ctx->id("INIT")] = init;
                 z--;
