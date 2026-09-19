@@ -1691,6 +1691,12 @@ struct Arch : BaseCtx
     void fixupPlacement();
     void fixupRouting();
 
+    // Find the bel the chipdb wires a RAMB36E1 cascade output pin to.
+    BelId cascadePartnerBel(BelId drv, IdString out_pin, IdString in_pin) const;
+    // Relocate RAMB36E1 data-cascade sinks that the placer left off the one bel
+    // the chipdb can reach from their driver (openXC7/nextpnr-xilinx#39).
+    void fixupBramCascades();
+
     // A constant-net sink the backbone fill pass (routeVcc) could not reach.
     struct ConstHoldout
     {
