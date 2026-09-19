@@ -463,12 +463,50 @@ void XilinxPacker::pack_dram()
                         m256 ? 0 : (ctx->xc7 ? 2 : 6));
                 packed_cells.insert(ci->name);
             }
+        } else if (cs.memtype == ctx->id("RAM64X1S")) {
+            // Single-port 64 x 1.  This is the RAM128X1S path with the high
+            // address bit absent, and with it the MUXF7 decode tree and the
+            // second RAM cell: exactly one SLICEM LUT in 64x1 RAM mode per
+            // cell.  memory_libmap emits this macro for *any* 64-deep
+            // memory (one cell per data bit) -- it is not a rare shape:
+            //
+            //   reg [7:0] mem [0:63];        // 8 x RAM64X1S
+            //
+            // Left in the unsupported list below it was a hard pack error,
+            // i.e. a legal design that synthesises fine but cannot be
+            // placed at all.  Write address == read address (single port),
+            // which is what create_dram_lut() already does: it connects
+            // RADR from `address` and WADR from the group control set.
+            // RAM64X1S has 6 address bits, so the slice's WA7/WA8
+            // (lutInfo.address_msb) stay unconnected and no write-address
+            // mux is programmed -- the same as the folded SPO cell of the
+            // RAM64X1D path, which also sits in the top LUT of the slice.
+            int z = height - 1;
+            CellInfo *base = nullptr;
+            for (CellInfo *ci : group.second) {
+                NPNR_ASSERT(ci->type == ctx->id("RAM64X1S")); // FIXME
+                if (z < 0) {
+                    // Site full: the next cell starts a fresh one, which the
+                    // placer places anywhere (as the RAM64X1D path does).
+                    z = height - 1;
+                    base = nullptr;
+                }
+                auto init = get_or_default(ci->params, ctx->id("INIT"), Property(0, 64));
+                NetInfo *o = get_net_or_empty(ci, ctx->id("O"));
+                disconnect_port(ctx, ci, ctx->id("O"));
+                CellInfo *spr = create_dram_lut(ci->name.str(ctx) + "/SP", base, cs, cs.wa,
+                                                get_net_or_empty(ci, ctx->id("D")), o, z);
+                if (base == nullptr)
+                    base = spr;
+                spr->params[ctx->id("INIT")] = init;
+                z--;
+                packed_cells.insert(ci->name);
+            }
         } else if (cs.memtype == ctx->id("RAMS32")
                 || cs.memtype == ctx->id("RAMD32")
                 || cs.memtype == ctx->id("RAMS64E")
                 || cs.memtype == ctx->id("RAMD64E")
-                || cs.memtype == ctx->id("RAM32X1S")
-                || cs.memtype == ctx->id("RAM64X1S")) {
+                || cs.memtype == ctx->id("RAM32X1S")) {
             log_error("Cannot pack unsupported primitive: %s\n", cs.memtype.c_str(ctx));
         }
     }
