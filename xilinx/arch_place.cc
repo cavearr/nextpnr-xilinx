@@ -1697,6 +1697,149 @@ void Arch::fixupPlacement()
             }
         }
     }
+
+    // BRAM cascade repair: before anything downstream commits to a cascade pair
+    // being unroutable (see fixupBramCascades() below).
+    fixupBramCascades();
+}
+
+// The RAMB36E1 data cascade is a dedicated route: a CASCADEOUT{A,B} bel pin
+// reaches exactly one other bel pin in the chipdb, the CASCADEIN{A,B} of the
+// BRAM tile the db wires it to.  Walk downhill from the driver's bel pin a few
+// pips (bel pin wire -> tile wire -> next tile's wire -> sink bel pin) to find it.
+BelId Arch::cascadePartnerBel(BelId drv, IdString out_pin, IdString in_pin) const
+{
+    WireId start = getBelPinWire(drv, out_pin);
+    if (start == WireId())
+        return BelId();
+    const IdString ramb36 = id("RAMB36E1_RAMB36E1");
+    std::vector<WireId> frontier{start}, next;
+    for (int depth = 0; depth < 3 && !frontier.empty(); depth++) {
+        next.clear();
+        for (WireId w : frontier)
+            for (auto pip : getPipsDownhill(w))
+                next.push_back(getPipDstWire(pip));
+        for (WireId w : next)
+            for (auto bp : getWireBelPins(w))
+                if (bp.pin == in_pin && bp.bel != drv && getBelType(bp.bel) == ramb36)
+                    return bp.bel;
+        frontier.swap(next);
+    }
+    return BelId();
+}
+
+// RAMB36E1 data cascades (CASCADEOUT{A,B} of one BRAM driving CASCADEIN{A,B} of
+// the next BRAM tile up) have exactly one route in the chipdb, so a pair the
+// placer separated -- or landed inverted, driver above sink -- has no path at
+// all and router2 aborts the entire build:
+//
+//   ERROR: Failed to route arc 0 of net '.../CAS_A',
+//   from SITEWIRE/RAMB36_X0Y29/CASCADEOUTA to SITEWIRE/RAMB36_X0Y20/CASCADEINA
+//
+// (openXC7/nextpnr-xilinx#39).  Unlike the DSP P cascade this is not a constant
+// offset -- BRAM tile rows step 5 *or* 6 in y (measured on xc7a100t: 108 hops of
+// -5, 22 of -6) -- so it cannot be expressed as the placer chain constraint
+// walk_dsp() uses.  Walk the db from the *placed* driver instead, and relocate
+// the sink to the one bel its cascade output is wired to.
+void Arch::fixupBramCascades()
+{
+    const IdString ramb36 = id("RAMB36E1_RAMB36E1");
+    struct Link
+    {
+        CellInfo *sink;
+        CellInfo *drv;
+        BelId want;
+    };
+    std::vector<Link> pending;
+    int n_legal = 0, n_moved = 0;
+    for (auto &cp : sorted(cells)) {
+        CellInfo *drv = cp.second;
+        // Unplaced cells are the validity-repair pass's business, and a stamped
+        // (BEL-constrained) cell is somebody else's decision.
+        if (drv->type != ramb36 || drv->bel == BelId() || drv->attrs.count(id("BEL")))
+            continue;
+        for (auto pins : {std::make_pair(id("CASCADEOUTA"), id("CASCADEINA")),
+                          std::make_pair(id("CASCADEOUTB"), id("CASCADEINB"))}) {
+            NetInfo *n = get_net_or_empty(drv, pins.first);
+            if (n == nullptr)
+                continue;
+            BelId want = cascadePartnerBel(drv->bel, pins.first, pins.second);
+            for (auto &u : n->users) {
+                CellInfo *sink = u.cell;
+                if (sink == drv || sink->type != ramb36 || u.port != pins.second)
+                    continue;
+                if (want == BelId()) {
+                    log_warning("BRAM cascade: no CASCADEIN bel reachable from %s/%s; '%s' left in place\n",
+                                getBelName(drv->bel).c_str(this), pins.first.c_str(this), sink->name.c_str(this));
+                    continue;
+                }
+                if (sink->bel == want)
+                    ++n_legal;
+                else if (sink->attrs.count(id("BEL")) || sink->belStrength > STRENGTH_STRONG)
+                    log_warning("BRAM cascade: '%s' is pinned to %s but '%s' cascades into %s; cannot move it\n",
+                                sink->name.c_str(this), getBelName(sink->bel).c_str(this), drv->name.c_str(this),
+                                getBelName(want).c_str(this));
+                else
+                    pending.push_back(Link{sink, drv, want});
+            }
+        }
+    }
+    // The bel a sink needs can be held by another cascade member (two chains can
+    // cross), and a swap resolves that; retry whatever stays blocked until a pass
+    // makes no progress.
+    for (int pass = 0; pass < 4 && !pending.empty(); pass++) {
+        std::vector<Link> retry;
+        for (auto &l : pending) {
+            if (l.sink->bel == l.want) {
+                ++n_legal;
+                continue;
+            }
+            CellInfo *occ = getBoundBelCell(l.want);
+            BelId old = l.sink->bel;
+            if (occ == nullptr) {
+                if (old != BelId())
+                    unbindBel(old);
+                bindBel(l.want, l.sink, STRENGTH_STRONG);
+                if (isBelLocationValid(l.want)) {
+                    ++n_moved;
+                    continue;
+                }
+                unbindBel(l.want);
+                if (old != BelId())
+                    bindBel(old, l.sink, STRENGTH_STRONG);
+                retry.push_back(l);
+            } else if (old != BelId() && occ->type == ramb36 && !occ->attrs.count(id("BEL")) &&
+                       occ->belStrength <= STRENGTH_STRONG && occ->constr_parent == nullptr &&
+                       occ->constr_children.empty()) {
+                unbindBel(old);
+                unbindBel(l.want);
+                bindBel(l.want, l.sink, STRENGTH_STRONG);
+                bindBel(old, occ, STRENGTH_STRONG);
+                if (isBelLocationValid(l.want) && isBelLocationValid(old)) {
+                    ++n_moved;
+                    continue;
+                }
+                unbindBel(l.want);
+                unbindBel(old);
+                bindBel(old, l.sink, STRENGTH_STRONG);
+                bindBel(l.want, occ, STRENGTH_STRONG);
+                retry.push_back(l);
+            } else {
+                retry.push_back(l);
+            }
+        }
+        if (retry.size() == pending.size())
+            break;
+        pending.swap(retry);
+    }
+    if (!pending.empty()) {
+        Link &l = pending.front();
+        log_error("BRAM cascade: '%s' has to sit on bel %s (the only CASCADEIN the chipdb reaches from %s) "
+                  "but that bel is occupied; cannot build\n",
+                  l.sink->name.c_str(this), getBelName(l.want).c_str(this), getBelName(l.drv->bel).c_str(this));
+    }
+    if (n_moved > 0 || n_legal > 0)
+        log_info("    BRAM cascade: %d link(s) already legal, %d relocated\n", n_legal, n_moved);
 }
 
 void Arch::fixupRouting()
