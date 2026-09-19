@@ -344,6 +344,7 @@ void XC7Packer::pack_io()
     }
     flush_cells();
     std::unordered_set<BelId> used_io_bels;
+    std::unordered_map<std::string, std::string> io_bel_owner; // bel name -> IO cell name
     int unconstr_io_count = 0;
     for (auto &iob : pad_and_buf) {
         CellInfo *pad = iob.first;
@@ -373,8 +374,30 @@ void XC7Packer::pack_io()
             if (boost::starts_with(tile, "MONITOR_"))
                 log_error("Cannot place regular IO on monitor/XADC site\n");
         }
-        if (pad->attrs.count(ctx->id("BEL"))) {
-            used_io_bels.insert(ctx->getBelByName(ctx->id(pad->attrs.at(ctx->id("BEL")).as_string())));
+        // A pad whose site is already fixed (by LOC/PACKAGE_PIN, or by a
+        // previous pass) is the only kind that can collide with another pad:
+        // an unconstrained one is handed a free bel further down, from the set
+        // that excludes everything claimed here.
+        const bool pad_site_fixed = pad->attrs.count(ctx->id("BEL")) != 0;
+        if (pad_site_fixed) {
+            const std::string bel_name = pad->attrs.at(ctx->id("BEL")).as_string();
+            auto owner = io_bel_owner.find(bel_name);
+            if (owner != io_bel_owner.end()) {
+                // Two IOs on one site -- i.e. two ports (or one port twice)
+                // constrained to the same package pin.  Only one of them can
+                // actually reach the pad, and which one is not the user's to
+                // choose, so say so here, in the names the user wrote, before
+                // the placer reports it as a bel collision between
+                // $iopadmap$... cells.
+                const std::string loc =
+                        pad->attrs.count(ctx->id("LOC")) ? pad->attrs.at(ctx->id("LOC")).as_string() : std::string("?");
+                log_warning("Conflicting outputs: IO '%s' and IO '%s' are both constrained to package pin '%s' "
+                            "(site '%s'); only one of them can drive the pad\n",
+                            pad->name.c_str(ctx), owner->second.c_str(), loc.c_str(), bel_name.c_str());
+            } else {
+                io_bel_owner.emplace(bel_name, pad->name.str(ctx));
+            }
+            used_io_bels.insert(ctx->getBelByName(ctx->id(bel_name)));
         } else {
             ++unconstr_io_count;
         }
