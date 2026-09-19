@@ -1019,7 +1019,13 @@ void timing_analysis(Context *ctx, bool print_histogram, bool print_fmax, bool p
                             break;
 #endif
                         auto it = net->wires.find(cursor);
-                        assert(it != net->wires.end());
+                        // This runs after placement, before routing, so no net is routed
+                        // yet; nets may also use dedicated routing resources that are not
+                        // tracked in net->wires. There is no pip breakdown to report in
+                        // either case.
+                        const bool wire_not_in_route = (it == net->wires.end());
+                        if (wire_not_in_route)
+                            break;
                         auto pip = it->second.pip;
                         NPNR_ASSERT(pip != PipId());
                         delay = ctx->getPipDelay(pip).maxDelay();
